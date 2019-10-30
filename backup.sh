@@ -2,13 +2,15 @@
 
 # Minecraft server automatic backup management script
 # by Nicolas Chan
+# modified by Martin Oyola
 # MIT License
 #
-# For Minecraft servers running in a GNU screen.
+# For Minecraft servers *WITH RCON ENABLED* running locally in Daemon mode or in a Docker Container (with local folder as mounted volume).
 # For most convenience, run automatically with cron.
 
-# Default Configuration 
-SCREEN_NAME="" # Name of the GNU Screen your Minecraft server is running in
+# Default Configuration
+RCON_PASS="" # RCON PASSWORD
+RCON_PORT="25575" # RCON PORT
 SERVER_WORLD="" # Server world directory
 BACKUP_DIRECTORY="" # Directory to save backups in
 MAX_BACKUPS=128 # -1 indicates unlimited
@@ -25,7 +27,7 @@ SUPPRESS_WARNINGS=false # Suppress warnings
 DATE_FORMAT="%F_%H-%M-%S"
 TIMESTAMP=$(date +$DATE_FORMAT)
 
-while getopts 'a:cd:e:f:hi:l:m:o:p:qs:v' FLAG; do
+while getopts 'a:cd:e:f:hi:l:m:o:p:qs:r:v' FLAG; do
   case $FLAG in
     a) COMPRESSION_ALGORITHM=$OPTARG ;;
     c) ENABLE_CHAT_MESSAGES=true ;;
@@ -45,7 +47,8 @@ while getopts 'a:cd:e:f:hi:l:m:o:p:qs:v' FLAG; do
        echo "-o    Output directory"
        echo "-p    Prefix that shows in Minecraft chat (default: Backup)"
        echo "-q    Suppress warnings"
-       echo "-s    Minecraft server screen name"
+       echo "-r    Minecraft server RCON PASS"
+       echo "-s    Minecraft server RCON PORT"
        echo "-v    Verbose mode"
        exit 0
        ;;
@@ -55,7 +58,8 @@ while getopts 'a:cd:e:f:hi:l:m:o:p:qs:v' FLAG; do
     o) BACKUP_DIRECTORY=$OPTARG ;;
     p) PREFIX=$OPTARG ;;
     q) SUPPRESS_WARNINGS=true ;;
-    s) SCREEN_NAME=$OPTARG ;;
+    r) RCON_PASS=$OPTARG ;;
+    s) RCON_PORT=$OPTARG ;;
     v) DEBUG=true ;;
   esac
 done
@@ -69,8 +73,8 @@ log-warning () {
 
 # Check for missing encouraged arguments
 if ! $SUPPRESS_WARNINGS; then
-  if [[ $SCREEN_NAME == "" ]]; then
-    log-warning "Minecraft screen name not specified (use -s)"
+  if [[ $RCON_PORT == "" ]]; then
+    log-warning "Minecraft RCON_PORT name not specified (use -r)"
   fi
 fi
 # Check for required arguments
@@ -95,24 +99,28 @@ ARCHIVE_PATH=$BACKUP_DIRECTORY/$ARCHIVE_FILE_NAME
 message-players () {
   local MESSAGE=$1
   local HOVER_MESSAGE=$2
-  message-players-color "$MESSAGE" "$HOVER_MESSAGE" "gray"
+  message-players-color "$MESSAGE" "$HOVER_MESSAGE" "blue"
 }
+
 execute-command () {
   local COMMAND=$1
-  if [[ $SCREEN_NAME != "" ]]; then
-    screen -S $SCREEN_NAME -p 0 -X stuff "$COMMAND$(printf \\r)"
+  if [[ $RCON_PASS != "" ]]; then
+    mcrcon -H localhost -P $RCON_PORT -p $RCON_PASS "$COMMAND"
   fi
 }
+
 message-players-error () {
   local MESSAGE=$1
   local HOVER_MESSAGE=$2
   message-players-color "$MESSAGE" "$HOVER_MESSAGE" "red"
 }
+
 message-players-success () {
   local MESSAGE=$1
   local HOVER_MESSAGE=$2
   message-players-color "$MESSAGE" "$HOVER_MESSAGE" "green"
 }
+
 message-players-color () {
   local MESSAGE=$1
   local HOVER_MESSAGE=$2
@@ -121,14 +129,14 @@ message-players-color () {
     echo "$MESSAGE ($HOVER_MESSAGE)"
   fi
   if $ENABLE_CHAT_MESSAGES; then
-    execute-command "tellraw @a [\"\",{\"text\":\"[$PREFIX] \",\"color\":\"gray\",\"italic\":true},{\"text\":\"$MESSAGE\",\"color\":\"$COLOR\",\"italic\":true,\"hoverEvent\":{\"action\":\"show_text\",\"value\":{\"text\":\"\",\"extra\":[{\"text\":\"$HOVER_MESSAGE\"}]}}}]"
+    execute-command "/tellraw @a [\"\",{\"text\":\"[$PREFIX] \",\"color\":\"gray\",\"bold\":true},{\"text\":\"$MESSAGE\",\"color\":\"$COLOR\",\"bold\":true,\"hoverEvent\":{\"action\":\"show_text\",\"value\":{\"text\":\"\",\"extra\":[{\"text\":\"$HOVER_MESSAGE\"}]}}}]"
   fi
 }
 
 # Notify players of start
 message-players "Starting backup..." "$ARCHIVE_FILE_NAME"
 
-# Parse file timestamp to one readable by "date" 
+# Parse file timestamp to one readable by "date"
 parse-file-timestamp () {
   local DATE_STRING=$(echo $1 | awk -F_ '{gsub(/-/,":",$2); print $1" "$2}')
   echo $DATE_STRING
@@ -198,7 +206,7 @@ delete-thinning () {
   for BLOCK_INDEX in ${!BLOCK_SIZES[@]}; do
     local BLOCK_SIZE=${BLOCK_SIZES[BLOCK_INDEX]}
     local BLOCK_FUNCTION=${BLOCK_FUNCTIONS[BLOCK_INDEX]}
-    local OLDEST_BACKUP_IN_BLOCK_INDEX=$((BLOCK_SIZE + CURRENT_INDEX)) # Not an off-by-one error because a new backup was already saved 
+    local OLDEST_BACKUP_IN_BLOCK_INDEX=$((BLOCK_SIZE + CURRENT_INDEX)) # Not an off-by-one error because a new backup was already saved
     local OLDEST_BACKUP_IN_BLOCK=${BACKUPS[OLDEST_BACKUP_IN_BLOCK_INDEX]}
 
     if [[ $OLDEST_BACKUP_IN_BLOCK == "" ]]; then
@@ -211,7 +219,7 @@ delete-thinning () {
     if $BLOCK_COMMAND; then
       # Oldest backup in this block satisfies the condition for placement in the next block
       if $DEBUG; then
-        echo "$OLDEST_BACKUP_IN_BLOCK promoted to next block" 
+        echo "$OLDEST_BACKUP_IN_BLOCK promoted to next block"
       fi
     else
       # Oldest backup in this block does not satisfy the condition for placement in next block
@@ -228,6 +236,9 @@ delete-thinning () {
 # Disable world autosaving
 execute-command "save-off"
 
+# Save the world and flush so the backup is the most recent save
+execute-command "save-all flush"
+
 # Backup world
 START_TIME=$(date +"%s")
 case $COMPRESSION_ALGORITHM in
@@ -241,11 +252,8 @@ esac
 sync
 END_TIME=$(date +"%s")
 
-# Enable world autosaving
+# Enable world autosaving again
 execute-command "save-on"
-
-# Save the world
-execute-command "save-all"
 
 # Delete old backups
 delete-old-backups () {
