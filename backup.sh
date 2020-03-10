@@ -3,12 +3,19 @@
 # Minecraft server automatic backup management script
 # by Nicolas Chan
 # modified by Martin Oyola
+# further modified by Patrick Mischke
 # MIT License
 #
-# For Minecraft servers *WITH RCON ENABLED* running locally in Daemon mode or in a Docker Container (with local folder as mounted volume).
+# Adapted for Minecraft servers running in a Docker Container with local folder as mounted volume, RCON enabled but not exposed.
+# Should also still work using RCON via pass/port, for non docker installations. 
+# Tested with itzg/minecraft-server image. 
+# This file is available at https://raw.githubusercontent.com/Patschke/minecraft-backup/master/backup.sh
+# 
 # For most convenience, run automatically with cron.
 
 # Default Configuration
+DOCKER_CONTAINER="" # Name of Docker Container
+USE_DOCKER=false # Use docker exec instead of RCON via port
 RCON_PASS="" # RCON PASSWORD
 RCON_PORT="25575" # RCON PORT
 SERVER_WORLD="" # Server world directory
@@ -27,14 +34,14 @@ SUPPRESS_WARNINGS=false # Suppress warnings
 DATE_FORMAT="%F_%H-%M-%S"
 TIMESTAMP=$(date +$DATE_FORMAT)
 
-while getopts 'a:cd:e:f:hi:l:m:o:p:qs:r:v' FLAG; do
+while getopts 'a:cd:e:f:hi:l:mn:o:p:qs:r:v' FLAG; do
   case $FLAG in
     a) COMPRESSION_ALGORITHM=$OPTARG ;;
     c) ENABLE_CHAT_MESSAGES=true ;;
     d) DELETE_METHOD=$OPTARG ;;
     e) COMPRESSION_FILE_EXTENSION=".$OPTARG" ;;
     f) TIMESTAMP=$OPTARG ;;
-    h) echo "Minecraft Backup (by Nicolas Chan)"
+    h) echo "Minecraft Backup (by Nicolas Chan, Martin Oyola and Patrick Mischke)"
        echo "-a    Compression algorithm (default: gzip)"
        echo "-c    Enable chat messages"
        echo "-d    Delete method: thin (default), sequential, none"
@@ -44,6 +51,7 @@ while getopts 'a:cd:e:f:hi:l:m:o:p:qs:r:v' FLAG; do
        echo "-i    Input directory (path to world folder)"
        echo "-l    Compression level (default: 3)"
        echo "-m    Maximum backups to keep, use -1 for unlimited (default: 128)"
+       echo "-n    Name of DOCKER CONTAINER (default: mc). This overrides usage of RCON PASS, RCON PORT"
        echo "-o    Output directory"
        echo "-p    Prefix that shows in Minecraft chat (default: Backup)"
        echo "-q    Suppress warnings"
@@ -55,12 +63,15 @@ while getopts 'a:cd:e:f:hi:l:m:o:p:qs:r:v' FLAG; do
     i) SERVER_WORLD=$OPTARG ;;
     l) COMPRESSION_LEVEL=$OPTARG ;;
     m) MAX_BACKUPS=$OPTARG ;;
+    n) DOCKER_CONTAINER=$OPTARG 
+       USE_DOCKER=true ;;
     o) BACKUP_DIRECTORY=$OPTARG ;;
     p) PREFIX=$OPTARG ;;
     q) SUPPRESS_WARNINGS=true ;;
     r) RCON_PASS=$OPTARG ;;
     s) RCON_PORT=$OPTARG ;;
     v) DEBUG=true ;;
+    *) echo "Invalid option used. Ignoring it."
   esac
 done
 
@@ -73,9 +84,12 @@ log-warning () {
 
 # Check for missing encouraged arguments
 if ! $SUPPRESS_WARNINGS; then
-  if [[ $RCON_PORT == "" ]]; then
-    log-warning "Minecraft RCON_PORT name not specified (use -r)"
+  if [[ $RCON_PORT == "" ]] && [ ! $USE_DOCKER ]; then
+    log-warning "Neither RCON_PORT (-s) nor DOCKER CONTAINER (-n) given. Falling back to RCON on default port" 
   fi
+fi
+if [[ ! $USE_DOCKER ]] && [[ $RCON_PASS == "" ]]; then
+  log-fatal "Neither DOCKER CONTAINER (-n) nor RCON PASS (-r) given. Backups will be taken while server is running"
 fi
 # Check for required arguments
 MISSING_CONFIGURATION=false
@@ -104,8 +118,11 @@ message-players () {
 
 execute-command () {
   local COMMAND=$1
-  if [[ $RCON_PASS != "" ]]; then
+  if [[ ! $USE_DOCKER ]] && [[ $RCON_PASS != "" ]]; then
     mcrcon -H localhost -P $RCON_PORT -p $RCON_PASS "$COMMAND"
+  fi
+  if [[ $USE_DOCKER ]]; then
+    docker exec -i $DOCKER_CONTAINER rcon-cli "$COMMAND"
   fi
 }
 
